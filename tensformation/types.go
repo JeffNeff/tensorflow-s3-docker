@@ -54,20 +54,7 @@ type S3Event struct {
 	} `json:"userIdentity"`
 }
 
-type TensorflowRequest struct {
-	Instances []struct {
-		B64 string `json:"b64"`
-	} `json:"instances"`
-}
-
-type TensorflowResponse struct {
-	Predictions []struct {
-		// DetectionClasses          []int       `json:"detection_classes"`
-		NumDetections             float64     `json:"num_detections"`
-		DetectionBoxes            [][]float64 `json:"detection_boxes"`
-		RawDetectionBoxes         [][]float64 `json:"raw_detection_boxes"`
-		DetectionScores           []float64   `json:"detection_scores"`
-		RawDetectionScores        [][]float64 `json:"raw_detection_scores"`
-		DetectionMulticlassScores [][]float64 `json:"detection_multiclass_scores"`
-	} `json:"predictions"`
+type B64ResponseEvent struct {
+	B64 string `json:"b64"`
+	URL string `json:"url"`
 }

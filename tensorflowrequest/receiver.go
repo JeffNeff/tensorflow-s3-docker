@@ -17,57 +17,47 @@ limitations under the License.
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 )
 
 const (
-	s3ObjectCreatedEvent = "com.amazon.s3.objectcreated"
-	response             = "io.triggermesh.transformations.tensformation.response"
+	tensformationEvent = "io.triggermesh.transformations.tensformation.response"
+	response           = "io.triggermesh.transformations.tensorflowrequest.response"
 )
 
 func (recv *Receiver) receive(ctx context.Context, e cloudevents.Event) (*cloudevents.Event, cloudevents.Result) {
 	log.Printf("Processing event from source %q", e.Source())
-	if typ := e.Type(); typ != s3ObjectCreatedEvent {
+	if typ := e.Type(); typ != tensformationEvent {
 		fmt.Println("wrong event type")
 		return emitErrorEvent("wrong event type", "wrongEventType")
 	}
 
-	req := &S3Event{}
+	req := &B64ResponseEvent{}
 	if err := e.DataAs(&req); err != nil {
 		log.Print(err)
 		return emitErrorEvent(err.Error(), "unmarshalingEvent")
 	}
 
-	image, err := recv.downloadFromS3Bucket(req)
+	err, tfResponse := recv.makeTensorflowRequest(req.B64)
 	if err != nil {
 		log.Print(err)
-		return emitErrorEvent(err.Error(), "downloadingFromS3")
-	}
-
-	url := "https://" + req.S3.Bucket.Name + ".s3." + recv.region + ".amazonaws.com/" + req.S3.Object.Key
-
-	resp := &B64ResponseEvent{
-		B64: image,
-		URL: url,
+		return emitErrorEvent(err.Error(), "requestingFromTensorflow")
 	}
 
 	event := cloudevents.NewEvent(cloudevents.VersionV1)
 	event.SetType(response)
-	event.SetSource(url)
+	event.SetSource(req.URL)
 	event.SetTime(time.Now())
-	err = event.SetData(cloudevents.ApplicationJSON, resp)
+	err = event.SetData(cloudevents.ApplicationJSON, tfResponse)
 	if err != nil {
 		log.Print(err)
 		return emitErrorEvent(err.Error(), "settingCEData")
@@ -76,42 +66,36 @@ func (recv *Receiver) receive(ctx context.Context, e cloudevents.Event) (*cloude
 	return &event, cloudevents.ResultACK
 }
 
-// downloadFromS3Bucket returns a base64 encoded string of the new image at s3
-func (recv *Receiver) downloadFromS3Bucket(e *S3Event) (string, error) {
-	bucket := e.S3.Bucket.Name
-	item := e.S3.Object.Key
-
-	file, err := os.Create(item)
-	if err != nil {
-		fmt.Println(err)
-		return "", err
-	}
-	defer file.Close()
-
-	numBytes, err := recv.s3d.Download(file,
-		&s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(item),
-		})
-
-	if err != nil {
-		fmt.Println(err)
-		return "", err
+func (recv *Receiver) makeTensorflowRequest(image string) (error, []byte) {
+	reqBody := &TensorflowRequest{
+		Instances: []struct {
+			B64 string "json:\"b64\""
+		}{{B64: image}},
 	}
 
-	fmt.Println("Downloaded", file.Name(), numBytes, "bytes")
+	b, err := json.Marshal(reqBody)
+	if err != nil {
+		return err, b
+	}
 
-	ef := encodeFile(file)
+	request, err := http.NewRequest(http.MethodPost, recv.tfEndpoint, bytes.NewBuffer(b))
+	if err != nil {
+		return err, b
+	}
 
-	return ef, nil
-}
+	res, err := recv.httpClient.Do(request)
+	if err != nil {
+		return err, b
+	}
 
-func encodeFile(f *os.File) string {
-	reader := bufio.NewReader(f)
-	content, _ := ioutil.ReadAll(reader)
-	encoded := base64.StdEncoding.EncodeToString(content)
+	defer res.Body.Close()
 
-	return encoded
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return err, b
+	}
+
+	return nil, body
 }
 
 func emitErrorEvent(er string, source string) (*cloudevents.Event, cloudevents.Result) {
